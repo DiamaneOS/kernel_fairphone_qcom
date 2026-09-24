@@ -121,10 +121,14 @@ void __noreturn __host_enter(struct kvm_cpu_context *host_ctxt);
 #ifdef __KVM_NVHE_HYPERVISOR__
 struct user_fpsimd_state *get_host_fpsimd_state(struct kvm_vcpu *vcpu);
 struct kvm_host_sve_state *get_host_sve_state(struct kvm_vcpu *vcpu);
+#else
+#define get_host_fpsimd_state(vcpu) NULL
+#define get_host_sve_state(vcpu) NULL
 #endif
 
 extern u64 kvm_nvhe_sym(id_aa64pfr0_el1_sys_val);
 extern u64 kvm_nvhe_sym(id_aa64pfr1_el1_sys_val);
+extern u64 kvm_nvhe_sym(id_aa64zfr0_el1_sys_val);
 extern u64 kvm_nvhe_sym(id_aa64isar0_el1_sys_val);
 extern u64 kvm_nvhe_sym(id_aa64isar1_el1_sys_val);
 extern u64 kvm_nvhe_sym(id_aa64isar2_el1_sys_val);
@@ -136,6 +140,7 @@ extern u64 kvm_nvhe_sym(id_aa64smfr0_el1_sys_val);
 extern unsigned long kvm_nvhe_sym(__icache_flags);
 extern unsigned int kvm_nvhe_sym(kvm_arm_vmid_bits);
 extern bool kvm_nvhe_sym(smccc_trng_available);
+extern unsigned int kvm_nvhe_sym(kvm_sve_max_vl);
 extern unsigned int kvm_nvhe_sym(kvm_host_sve_max_vl);
 
 struct kvm_nvhe_clock_data {

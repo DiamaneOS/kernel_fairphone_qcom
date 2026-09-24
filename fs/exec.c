@@ -64,6 +64,11 @@
 #include <linux/io_uring.h>
 #include <linux/syscall_user_dispatch.h>
 #include <linux/coredump.h>
+#include <linux/random.h>
+
+#ifndef __GENKSYMS__
+#include <linux/dma-buf.h>
+#endif
 
 #include <linux/uaccess.h>
 #include <asm/mmu_context.h>
@@ -170,7 +175,7 @@ SYSCALL_DEFINE1(uselib, const char __user *, library)
 exit:
 	fput(file);
 out:
-  	return error;
+	return error;
 }
 #endif /* #ifdef CONFIG_USELIB */
 
@@ -284,6 +289,8 @@ static int __bprm_mm_init(struct linux_binprm *bprm)
 	mm->stack_vm = mm->total_vm = 1;
 	mmap_write_unlock(mm);
 	bprm->p = vma->vm_end - sizeof(void *);
+	if (!(current->personality & ADDR_NO_RANDOMIZE) && randomize_va_space)
+		bprm->p ^= get_random_u32() & ~PAGE_MASK;
 	return 0;
 err:
 	mmap_write_unlock(mm);
@@ -751,7 +758,7 @@ int setup_arg_pages(struct linux_binprm *bprm,
 		    unsigned long stack_top,
 		    int executable_stack)
 {
-	unsigned long ret;
+	int ret;
 	unsigned long stack_shift;
 	struct mm_struct *mm = current->mm;
 	struct vm_area_struct *vma = bprm->vma;
@@ -1251,6 +1258,7 @@ void __set_task_comm(struct task_struct *tsk, const char *buf, bool exec)
 int begin_new_exec(struct linux_binprm * bprm)
 {
 	struct task_struct *me = current;
+	struct files_struct *old_files;
 	int retval;
 
 	/* Once we are committed compute the creds */
@@ -1275,8 +1283,19 @@ int begin_new_exec(struct linux_binprm * bprm)
 	 */
 	io_uring_task_cancel();
 
+	/*
+	 * unshare_files() may not do anything, but we still need to account dmabufs against the
+	 * new_dmabuf_info even if it doesn't. We need to keep track of the original files_struct
+	 * to handle task_dma_buf_info refcounting.
+	 */
+	old_files = me->files;
+
 	/* Ensure the files table is not shared. */
 	retval = unshare_files();
+	if (retval)
+		goto out;
+
+	retval = dma_buf_begin_new_exec(old_files);
 	if (retval)
 		goto out;
 
@@ -1303,6 +1322,15 @@ int begin_new_exec(struct linux_binprm * bprm)
 		goto out;
 
 	bprm->mm = NULL;
+	/*
+	 * New MM has just been installed. Use the task's new dmabuf_info (from
+	 * dma_buf_begin_new_exec) for the new mm_struct.
+	 */
+	if (IS_ENABLED(CONFIG_DMA_SHARED_BUFFER)) {
+		if (current->dmabuf_info)
+			get_dmabuf_info(current->dmabuf_info);
+		me->mm->abi_extend->dmabuf_info = current->dmabuf_info;
+	}
 
 #ifdef CONFIG_POSIX_TIMERS
 	spin_lock_irq(&me->sighand->siglock);
@@ -1911,6 +1939,10 @@ static int do_execveat_common(int fd, struct filename *filename,
 		retval = PTR_ERR(bprm);
 		goto out_ret;
 	}
+
+#define FLAG_COMPAT_VA_39_BIT (1 << 30)
+	bprm->compat_va_39_bit = flags & FLAG_COMPAT_VA_39_BIT;
+	flags &= ~FLAG_COMPAT_VA_39_BIT; // flag validation fails when it sees an unknown flag
 
 	retval = count(argv, MAX_ARG_STRINGS);
 	if (retval == 0)

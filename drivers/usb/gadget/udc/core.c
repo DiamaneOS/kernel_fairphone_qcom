@@ -194,6 +194,9 @@ struct usb_request *usb_ep_alloc_request(struct usb_ep *ep,
 
 	req = ep->ops->alloc_request(ep, gfp_flags);
 
+	if (req)
+		req->ep = ep;
+
 	trace_usb_ep_alloc_request(ep, req, req ? 0 : -ENOMEM);
 
 	return req;
@@ -672,6 +675,8 @@ out:
 }
 EXPORT_SYMBOL_GPL(usb_gadget_vbus_disconnect);
 
+extern int deny_new_usb;
+
 static int usb_gadget_connect_locked(struct usb_gadget *gadget)
 	__must_hold(&gadget->udc->connect_lock)
 {
@@ -679,6 +684,12 @@ static int usb_gadget_connect_locked(struct usb_gadget *gadget)
 
 	if (!gadget->ops->pullup) {
 		ret = -EOPNOTSUPP;
+		goto out;
+	}
+
+	if (deny_new_usb) {
+		dev_err(&gadget->dev, "blocked USB gadget connection\n");
+		ret = -EPERM;
 		goto out;
 	}
 
@@ -1093,6 +1104,7 @@ void usb_gadget_set_state(struct usb_gadget *gadget,
 {
 	gadget->state = state;
 	schedule_work(&gadget->work);
+	trace_usb_gadget_set_state(gadget, 0);
 }
 EXPORT_SYMBOL_GPL(usb_gadget_set_state);
 

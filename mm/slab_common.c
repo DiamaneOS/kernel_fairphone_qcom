@@ -34,10 +34,10 @@
 #undef CREATE_TRACE_POINTS
 #include <trace/hooks/mm.h>
 
-enum slab_state slab_state;
+enum slab_state slab_state __ro_after_init;
 LIST_HEAD(slab_caches);
 DEFINE_MUTEX(slab_mutex);
-struct kmem_cache *kmem_cache;
+struct kmem_cache *kmem_cache __ro_after_init;
 
 static LIST_HEAD(slab_caches_to_rcu_destroy);
 static void slab_caches_to_rcu_destroy_workfn(struct work_struct *work);
@@ -57,7 +57,7 @@ static DECLARE_WORK(slab_caches_to_rcu_destroy_work,
 /*
  * Merge control. If this is set then no merging of slab caches will occur.
  */
-static bool slab_nomerge = !IS_ENABLED(CONFIG_SLAB_MERGE_DEFAULT);
+static bool slab_nomerge __ro_after_init = !IS_ENABLED(CONFIG_SLAB_MERGE_DEFAULT);
 
 static int __init setup_slab_nomerge(char *str)
 {
@@ -1221,7 +1221,6 @@ static void cache_show(struct kmem_cache *s, struct seq_file *m)
 	seq_printf(m, " : slabdata %6lu %6lu %6lu",
 		   sinfo.active_slabs, sinfo.num_slabs, sinfo.shared_avail);
 	slabinfo_show_stats(m, s);
-	trace_android_vh_cache_show(m, &sinfo, s);
 	seq_putc(m, '\n');
 }
 

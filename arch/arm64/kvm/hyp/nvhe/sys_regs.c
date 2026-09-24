@@ -20,6 +20,7 @@
  */
 u64 id_aa64pfr0_el1_sys_val;
 u64 id_aa64pfr1_el1_sys_val;
+u64 id_aa64zfr0_el1_sys_val;
 u64 id_aa64isar0_el1_sys_val;
 u64 id_aa64isar1_el1_sys_val;
 u64 id_aa64isar2_el1_sys_val;
@@ -38,6 +39,7 @@ static void inject_undef64(struct kvm_vcpu *vcpu)
 
 	*vcpu_pc(vcpu) = read_sysreg_el2(SYS_ELR);
 	*vcpu_cpsr(vcpu) = read_sysreg_el2(SYS_SPSR);
+	__vcpu_sys_reg(vcpu, VBAR_EL1) = read_sysreg_el1(SYS_VBAR);
 
 	kvm_pend_exception(vcpu, EXCEPT_AA64_EL1_SYNC);
 
@@ -91,6 +93,9 @@ static u64 get_pvm_id_aa64pfr0(const struct kvm_vcpu *vcpu)
 	set_mask |= get_restricted_features_unsigned(id_aa64pfr0_el1_sys_val,
 		PVM_ID_AA64PFR0_RESTRICT_UNSIGNED);
 
+	if (!vcpu_has_sve(vcpu))
+		set_mask &= ~ARM64_FEATURE_MASK(ID_AA64PFR0_EL1_SVE);
+
 	return (id_aa64pfr0_el1_sys_val & allow_mask) | set_mask;
 }
 
@@ -107,11 +112,9 @@ static u64 get_pvm_id_aa64pfr1(const struct kvm_vcpu *vcpu)
 
 static u64 get_pvm_id_aa64zfr0(const struct kvm_vcpu *vcpu)
 {
-	/*
-	 * No support for Scalable Vectors, therefore, hyp has no sanitized
-	 * copy of the feature id register.
-	 */
-	BUILD_BUG_ON(PVM_ID_AA64ZFR0_ALLOW != 0ULL);
+	if (vcpu_has_sve(vcpu))
+		return id_aa64zfr0_el1_sys_val & PVM_ID_AA64ZFR0_ALLOW;
+
 	return 0;
 }
 
@@ -445,6 +448,7 @@ static const struct sys_reg_desc pvm_sys_reg_descs[] = {
 
 	HOST_HANDLED(SYS_CCSIDR_EL1),
 	HOST_HANDLED(SYS_CLIDR_EL1),
+	RAZ_WI(SYS_AIDR_EL1),
 	HOST_HANDLED(SYS_CSSELR_EL1),
 	HOST_HANDLED(SYS_CTR_EL0),
 
@@ -508,7 +512,7 @@ static const struct sys_reg_desc_reset pvm_sys_reg_reset_vals[] = {
 	RESET_VAL(CPACR_EL1, 0),
 	RESET_VAL(ZCR_EL1, 0),
 	RESET_VAL(TCR_EL1, 0),
-	RESET_VAL(VBAR_EL1, 0),
+	RESET_VAL(VBAR_EL1, 0x1de7ec7edbadc000ULL),
 	RESET_VAL(CONTEXTIDR_EL1, 0),
 	RESET_FUNC(AMAIR_EL1, reset_amair_el1),
 	RESET_VAL(CNTKCTL_EL1, 0),

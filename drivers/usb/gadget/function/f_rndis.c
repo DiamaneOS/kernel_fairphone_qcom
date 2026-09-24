@@ -11,6 +11,7 @@
 
 /* #define VERBOSE_DEBUG */
 
+#include <linux/cleanup.h>
 #include <linux/slab.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
@@ -18,6 +19,8 @@
 #include <linux/etherdevice.h>
 
 #include <linux/atomic.h>
+
+#include <linux/usb/gadget.h>
 
 #include "u_ether.h"
 #include "u_ether_configfs.h"
@@ -105,51 +108,6 @@ static unsigned int bitrate(struct usb_gadget *g)
 #define RNDIS_STATUS_INTERVAL_MS	32
 #define STATUS_BYTECOUNT		8	/* 8 bytes data */
 
-#define USB_ETHERNET_CONFIGFS_ITEM_ATTR_WCEIS(_f_)			\
-	static ssize_t _f_##_opts_wceis_show(struct config_item *item,	\
-					     char *page)		\
-	{								\
-		struct f_##_f_##_opts *opts = to_f_##_f_##_opts(item);	\
-		bool wceis;						\
-									\
-		if (opts->bound == false) {				\
-			pr_err("Gadget function do not bind yet.\n");	\
-			return -ENODEV;					\
-		}							\
-									\
-		mutex_lock(&opts->lock);				\
-		wceis = opts->wceis;					\
-		mutex_unlock(&opts->lock);				\
-		return snprintf(page, PAGE_SIZE, "%d", wceis);		\
-	}								\
-									\
-	static ssize_t _f_##_opts_wceis_store(struct config_item *item, \
-					      const char *page, size_t len)\
-	{								\
-		struct f_##_f_##_opts *opts = to_f_##_f_##_opts(item);	\
-		bool wceis;						\
-		int ret;						\
-									\
-		if (opts->bound == false) {				\
-			pr_err("Gadget function do not bind yet.\n");	\
-			return -ENODEV;					\
-		}							\
-									\
-		mutex_lock(&opts->lock);				\
-									\
-		ret = kstrtobool(page, &wceis);				\
-		if (ret)						\
-			goto out;					\
-									\
-		opts->wceis = wceis;					\
-		ret = len;						\
-out:									\
-		mutex_unlock(&opts->lock);				\
-									\
-		return ret;						\
-	}								\
-									\
-	CONFIGFS_ATTR(_f_##_opts_, wceis)
 
 /* interface descriptor: */
 
@@ -720,6 +678,8 @@ rndis_bind(struct usb_configuration *c, struct usb_function *f)
 	struct usb_ep		*ep;
 
 	struct f_rndis_opts *rndis_opts;
+	struct usb_os_desc_table        *os_desc_table __free(kfree) = NULL;
+	struct usb_request		*request __free(free_usb_request) = NULL;
 
 	if (!can_support_rndis(c))
 		return -EINVAL;
@@ -727,17 +687,16 @@ rndis_bind(struct usb_configuration *c, struct usb_function *f)
 	rndis_opts = container_of(f->fi, struct f_rndis_opts, func_inst);
 
 	if (cdev->use_os_string) {
-		f->os_desc_table = kzalloc(sizeof(*f->os_desc_table),
-					   GFP_KERNEL);
-		if (!f->os_desc_table)
+		os_desc_table = kzalloc(sizeof(*os_desc_table), GFP_KERNEL);
+		if (!os_desc_table)
 			return -ENOMEM;
-		f->os_desc_n = 1;
-		f->os_desc_table[0].os_desc = &rndis_opts->rndis_os_desc;
 	}
 
-	rndis_iad_descriptor.bFunctionClass = rndis_opts->class;
-	rndis_iad_descriptor.bFunctionSubClass = rndis_opts->subclass;
-	rndis_iad_descriptor.bFunctionProtocol = rndis_opts->protocol;
+	scoped_guard(mutex, &rndis_opts->lock) {
+		rndis_iad_descriptor.bFunctionClass = rndis_opts->class;
+		rndis_iad_descriptor.bFunctionSubClass = rndis_opts->subclass;
+		rndis_iad_descriptor.bFunctionProtocol = rndis_opts->protocol;
+	}
 
 	/*
 	 * in drivers/usb/gadget/configfs.c:configfs_composite_bind()
@@ -750,16 +709,14 @@ rndis_bind(struct usb_configuration *c, struct usb_function *f)
 		gether_set_gadget(rndis_opts->net, cdev->gadget);
 		status = gether_register_netdev(rndis_opts->net);
 		if (status)
-			goto fail;
+			return status;
 		rndis_opts->bound = true;
 	}
 
 	us = usb_gstrings_attach(cdev, rndis_strings,
 				 ARRAY_SIZE(rndis_string_defs));
-	if (IS_ERR(us)) {
-		status = PTR_ERR(us);
-		goto fail;
-	}
+	if (IS_ERR(us))
+		return PTR_ERR(us);
 	rndis_control_intf.iInterface = us[0].id;
 	rndis_data_intf.iInterface = us[1].id;
 	rndis_iad_descriptor.iFunction = us[2].id;
@@ -767,57 +724,30 @@ rndis_bind(struct usb_configuration *c, struct usb_function *f)
 	/* allocate instance-specific interface IDs */
 	status = usb_interface_id(c, f);
 	if (status < 0)
-		goto fail;
+		return status;
 	rndis->ctrl_id = status;
 	rndis_iad_descriptor.bFirstInterface = status;
 
 	rndis_control_intf.bInterfaceNumber = status;
 	rndis_union_desc.bMasterInterface0 = status;
 
-	if (cdev->use_os_string)
-		f->os_desc_table[0].if_id =
-			rndis_iad_descriptor.bFirstInterface;
-
 	status = usb_interface_id(c, f);
 	if (status < 0)
-		goto fail;
+		return status;
 	rndis->data_id = status;
 
 	rndis_data_intf.bInterfaceNumber = status;
 	rndis_union_desc.bSlaveInterface0 = status;
 
-	if (rndis_opts->wceis) {
-		/* "Wireless" RNDIS; auto-detected by Windows */
-		rndis_iad_descriptor.bFunctionClass =
-						USB_CLASS_WIRELESS_CONTROLLER;
-		rndis_iad_descriptor.bFunctionSubClass = 0x01;
-		rndis_iad_descriptor.bFunctionProtocol = 0x03;
-		rndis_control_intf.bInterfaceClass =
-						USB_CLASS_WIRELESS_CONTROLLER;
-		rndis_control_intf.bInterfaceSubClass =	 0x01;
-		rndis_control_intf.bInterfaceProtocol =	 0x03;
-	} else {
-		rndis_iad_descriptor.bFunctionClass = USB_CLASS_COMM;
-		rndis_iad_descriptor.bFunctionSubClass =
-						USB_CDC_SUBCLASS_ETHERNET;
-		rndis_iad_descriptor.bFunctionProtocol = USB_CDC_PROTO_NONE;
-		rndis_control_intf.bInterfaceClass = USB_CLASS_COMM;
-		rndis_control_intf.bInterfaceSubClass =	USB_CDC_SUBCLASS_ACM;
-		rndis_control_intf.bInterfaceProtocol =
-						USB_CDC_ACM_PROTO_VENDOR;
-	}
-
-	status = -ENODEV;
-
 	/* allocate instance-specific endpoints */
 	ep = usb_ep_autoconfig(cdev->gadget, &fs_in_desc);
 	if (!ep)
-		goto fail;
+		return -ENODEV;
 	rndis->port.in_ep = ep;
 
 	ep = usb_ep_autoconfig(cdev->gadget, &fs_out_desc);
 	if (!ep)
-		goto fail;
+		return -ENODEV;
 	rndis->port.out_ep = ep;
 
 	/* NOTE:  a status/notification endpoint is, strictly speaking,
@@ -826,21 +756,19 @@ rndis_bind(struct usb_configuration *c, struct usb_function *f)
 	 */
 	ep = usb_ep_autoconfig(cdev->gadget, &fs_notify_desc);
 	if (!ep)
-		goto fail;
+		return -ENODEV;
 	rndis->notify = ep;
 
-	status = -ENOMEM;
-
 	/* allocate notification request and buffer */
-	rndis->notify_req = usb_ep_alloc_request(ep, GFP_KERNEL);
-	if (!rndis->notify_req)
-		goto fail;
-	rndis->notify_req->buf = kmalloc(STATUS_BYTECOUNT, GFP_KERNEL);
-	if (!rndis->notify_req->buf)
-		goto fail;
-	rndis->notify_req->length = STATUS_BYTECOUNT;
-	rndis->notify_req->context = rndis;
-	rndis->notify_req->complete = rndis_response_complete;
+	request = usb_ep_alloc_request(ep, GFP_KERNEL);
+	if (!request)
+		return -ENOMEM;
+	request->buf = kmalloc(STATUS_BYTECOUNT, GFP_KERNEL);
+	if (!request->buf)
+		return -ENOMEM;
+	request->length = STATUS_BYTECOUNT;
+	request->context = rndis;
+	request->complete = rndis_response_complete;
 
 	/* support all relevant hardware speeds... we expect that when
 	 * hardware is dual speed, all bulk-capable endpoints work at
@@ -857,7 +785,7 @@ rndis_bind(struct usb_configuration *c, struct usb_function *f)
 	status = usb_assign_descriptors(f, eth_fs_function, eth_hs_function,
 			eth_ss_function, eth_ss_function);
 	if (status)
-		goto fail;
+		return status;
 
 	rndis->port.open = rndis_open;
 	rndis->port.close = rndis_close;
@@ -868,9 +796,18 @@ rndis_bind(struct usb_configuration *c, struct usb_function *f)
 	if (rndis->manufacturer && rndis->vendorID &&
 			rndis_set_param_vendor(rndis->params, rndis->vendorID,
 					       rndis->manufacturer)) {
-		status = -EINVAL;
-		goto fail_free_descs;
+		usb_free_all_descriptors(f);
+		return -EINVAL;
 	}
+
+	if (cdev->use_os_string) {
+		os_desc_table[0].os_desc = &rndis_opts->rndis_os_desc;
+		os_desc_table[0].if_id = rndis_iad_descriptor.bFirstInterface;
+		f->os_desc_table = no_free_ptr(os_desc_table);
+		f->os_desc_n = 1;
+
+	}
+	rndis->notify_req = no_free_ptr(request);
 
 	/* NOTE:  all that is done without knowing or caring about
 	 * the network link ... which is unavailable to this code
@@ -883,21 +820,6 @@ rndis_bind(struct usb_configuration *c, struct usb_function *f)
 			rndis->port.in_ep->name, rndis->port.out_ep->name,
 			rndis->notify->name);
 	return 0;
-
-fail_free_descs:
-	usb_free_all_descriptors(f);
-fail:
-	kfree(f->os_desc_table);
-	f->os_desc_n = 0;
-
-	if (rndis->notify_req) {
-		kfree(rndis->notify_req->buf);
-		usb_ep_free_request(rndis->notify, rndis->notify_req);
-	}
-
-	ERROR(cdev, "%s: can't bind, err %d\n", f->name, status);
-
-	return status;
 }
 
 void rndis_borrow_net(struct usb_function_instance *f, struct net_device *net)
@@ -944,9 +866,6 @@ USB_ETHER_CONFIGFS_ITEM_ATTR_U8_RW(rndis, subclass);
 /* f_rndis_opts_protocol */
 USB_ETHER_CONFIGFS_ITEM_ATTR_U8_RW(rndis, protocol);
 
-/* f_rndis_opts_wceis */
-USB_ETHERNET_CONFIGFS_ITEM_ATTR_WCEIS(rndis);
-
 static struct configfs_attribute *rndis_attrs[] = {
 	&rndis_opts_attr_dev_addr,
 	&rndis_opts_attr_host_addr,
@@ -955,7 +874,6 @@ static struct configfs_attribute *rndis_attrs[] = {
 	&rndis_opts_attr_class,
 	&rndis_opts_attr_subclass,
 	&rndis_opts_attr_protocol,
-	&rndis_opts_attr_wceis,
 	NULL,
 };
 
@@ -995,7 +913,7 @@ static struct usb_function_instance *rndis_alloc_inst(void)
 
 	mutex_init(&opts->lock);
 	opts->func_inst.free_func_inst = rndis_free_inst;
-	opts->net = gether_setup_name_default("rndis");
+	opts->net = gether_setup_default();
 	if (IS_ERR(opts->net)) {
 		struct net_device *net = opts->net;
 		kfree(opts);
@@ -1019,9 +937,6 @@ static struct usb_function_instance *rndis_alloc_inst(void)
 		return ERR_CAST(rndis_interf_group);
 	}
 	opts->rndis_interf_group = rndis_interf_group;
-
-	/* Enable "Wireless" RNDIS by default */
-	opts->wceis = true;
 
 	return &opts->func_inst;
 }
