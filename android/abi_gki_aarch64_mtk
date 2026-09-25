@@ -134,6 +134,7 @@
   call_rcu
   cancel_delayed_work
   cancel_delayed_work_sync
+  cancel_work
   cancel_work_sync
   capable
   cdc_parse_cdc_header
@@ -535,7 +536,6 @@
   devm_mbox_controller_register
   devm_mdiobus_alloc_size
   devm_memremap
-  devm_memremap_pages
   devm_mfd_add_devices
   devm_nvmem_cell_get
   devm_nvmem_cell_put

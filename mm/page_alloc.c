@@ -1577,6 +1577,7 @@ static __always_inline bool free_pages_prepare(struct page *page,
 	page_cpupid_reset_last(page);
 	page->flags &= ~PAGE_FLAGS_CHECK_AT_PREP;
 	trace_android_vh_mm_free_page(page);
+	page->private = 0;
 	reset_page_owner(page, order);
 	free_page_pinner(page, order);
 	page_table_check_free(page, order);
@@ -2677,6 +2678,12 @@ void prep_new_page(struct page *page, unsigned int order, gfp_t gfp_flags,
 							unsigned int alloc_flags)
 {
 	post_alloc_hook(page, order, gfp_flags);
+
+	if (IS_ENABLED(CONFIG_PAGE_SANITIZE_VERIFY) && want_init_on_free()) {
+		int i;
+		for (i = 0; i < (1 << order); i++)
+			verify_zero_highpage(page + i);
+	}
 
 	if (order && (gfp_flags & __GFP_COMP))
 		prep_compound_page(page, order);
